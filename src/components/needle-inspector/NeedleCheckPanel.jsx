@@ -8,7 +8,7 @@ import { Input } from "./Input"
 import lockIcon from '../../assets/icon/lock.png';
 import unlockIcon from '../../assets/icon/unlock.png';
 
-export default function NeedleCheckPanel({ mode, isMotorConnected, needlePosition, onNeedleUp, onNeedleDown, websocket, isWsConnected, onMotorPositionChange }) {
+export default function NeedleCheckPanel({ mode, isMotorConnected, needlePosition, onNeedleUp, onNeedleDown, websocket, isWsConnected, onMotorPositionChange, resistance1, resistance2, resistance1Status, resistance2Status }) {
   // 모터 상태에 따라 needleStatus 동기화
   const [needleStatus, setNeedleStatus] = useState(needlePosition === 'UP' ? 'UP' : needlePosition === 'DOWN' ? 'DOWN' : 'MOVING')
   // 버튼에 표시할 텍스트 (다음 동작을 표시, MOVING일 때는 현재 상태 유지)
@@ -292,6 +292,78 @@ export default function NeedleCheckPanel({ mode, isMotorConnected, needlePositio
                 UP & DOWN
               </Button>
             </div>
+          </div>
+        </div>
+        
+        {/* 저항 모니터링 섹션 */}
+        <div style={{
+          borderTop: '1px solid #374151',
+          paddingTop: '1.5dvh',
+          marginTop: '1.5dvh'
+        }}>
+          <div style={{ marginBottom: '1dvh', fontSize: '1.3dvh', color: '#D1D5DB' }}>실시간 저항 모니터링</div>
+          
+          {/* 저항 1 */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '1dvw',
+            marginBottom: '1dvh'
+          }}>
+            <label style={{ width: '30%', fontSize: '1.2dvh', color: '#9CA3AF' }}>저항 1:</label>
+            <div style={{
+              flex: 1,
+              padding: '0.8dvh 1dvw',
+              backgroundColor: '#1F2937',
+              borderRadius: '0.375rem',
+              border: `1px solid ${
+                resistance1Status === 'OK' ? '#10B981' : 
+                resistance1Status === 'ERROR' ? '#EF4444' : 
+                '#6B7280'
+              }`,
+              color: resistance1Status === 'OK' ? '#10B981' : 
+                     resistance1Status === 'ERROR' ? '#EF4444' : 
+                     '#9CA3AF',
+              fontSize: '1.2dvh',
+              textAlign: 'center',
+              fontFamily: 'monospace'
+            }}>
+              {resistance1 !== null && resistance1 !== undefined ? 
+                `${(0.001 * resistance1).toFixed(3)} kΩ` : 
+                'N/A'}
+            </div>
+
+          </div>
+          
+          {/* 저항 2 */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '1dvw'
+          }}>
+            <label style={{ width: '30%', fontSize: '1.2dvh', color: '#9CA3AF' }}>저항 2:</label>
+            <div style={{
+              flex: 1,
+              padding: '0.8dvh 1dvw',
+              backgroundColor: '#1F2937',
+              borderRadius: '0.375rem',
+              border: `1px solid ${
+                resistance2Status === 'OK' ? '#10B981' : 
+                resistance2Status === 'ERROR' ? '#EF4444' : 
+                '#6B7280'
+              }`,
+              color: resistance2Status === 'OK' ? '#10B981' : 
+                     resistance2Status === 'ERROR' ? '#EF4444' : 
+                     '#9CA3AF',
+              fontSize: '1.2dvh',
+              textAlign: 'center',
+              fontFamily: 'monospace'
+            }}>
+              {resistance2 !== null && resistance2 !== undefined ? 
+                `${(0.001 * resistance2).toFixed(3)} kΩ` : 
+                'N/A'}
+            </div>
+
           </div>
         </div>
       </div>

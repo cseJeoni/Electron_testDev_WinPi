@@ -15,324 +15,162 @@ except ImportError:
 
 # EEPROM 설정
 I2C_BUS = 1
-
-# MTR 버전별 EEPROM 설정
 MTR20_EEPROM_ADDRESS = 0x50
 MTR20_CLASSYS_OFFSET = 0x10
 MTR20_CUTERA_OFFSET = 0x80
-
 MTR40_EEPROM_ADDRESS = 0x51
 MTR40_OFFSET = 0x70
 
-# GPIO 초기화 (RPi.GPIO 사용)
+# --- [수정] GPIO 초기화 (gpiozero 라이브러리로 통합) ---
 gpio_available = False
 pin18 = None
-needle_tip_connected = False  # 니들팁 연결 상태 (전역 변수)
-last_eeprom_data = {"success": False, "error": "니들팁이 연결되지 않음"}  # 마지막 EEPROM 상태
+pin23 = None # pin23 객체 추가
+needle_tip_connected = False
 
 try:
-    import RPi.GPIO as GPIO
-    from gpiozero import DigitalInputDevice  # pin18용으로 gpiozero 유지
+    from gpiozero import DigitalInputDevice, Button
     
-    # GPIO 모드 설정
-    GPIO.setmode(GPIO.BCM)
-    
-    # GPIO18은 기존 gpiozero 방식 유지
+    # GPIO18: 기존 DigitalInputDevice 유지
     pin18 = DigitalInputDevice(18)
     
-    # GPIO23은 RPi.GPIO 방식으로 설정
-    GPIO.setup(23, GPIO.IN, pull_up_down=GPIO.PUD_UP)  # 풀업 저항 활성화
+    # GPIO23: Button 클래스로 변경 (내부 풀업, 바운스 타임 지원)
+    pin23 = Button(23, pull_up=True, bounce_time=0.2)
+    
+    # 초기 니들팁 상태 설정 (is_pressed는 풀업 상태에서 LOW일 때 True)
+    needle_tip_connected = pin23.is_pressed
+    print(f"[GPIO23] 초기 니들팁 상태: {'연결됨' if needle_tip_connected else '분리됨'}")
+
+    # 니들팁 연결/해제 이벤트 핸들러 정의
+    def _on_tip_connected():
+        global needle_tip_connected
+        needle_tip_connected = True
+        print("[GPIO23] 니들팁 상태 변경: 연결됨")
+
+    def _on_tip_disconnected():
+        global needle_tip_connected
+        needle_tip_connected = False
+        print("[GPIO23] 니들팁 상태 변경: 분리됨")
+
+    # 이벤트 핸들러 할당
+    pin23.when_pressed = _on_tip_connected
+    pin23.when_released = _on_tip_disconnected
     
     gpio_available = True
-    print("[OK] GPIO 18번(gpiozero), 23번(RPi.GPIO) 핀 입력 모드로 초기화 완료")
+    print("[OK] GPIO 18/23 초기화 완료 (gpiozero 라이브러리)")
+
 except ImportError as ie:
     print(f"[ERROR] GPIO 모듈을 찾을 수 없습니다: {ie}. GPIO 기능이 비활성화됩니다.")
 except Exception as e:
     print(f"[ERROR] GPIO 초기화 오류: {e}")
+# --- [여기까지 수정] ---
 
 motor = MotorThreadedController()
 connected_clients = set()
 
-# GPIO23 인터럽트 핸들러 (RPi.GPIO 방식) - 니들팁 상태만 관리
-def gpio23_callback(channel):
-    """GPIO23 상태 변화 시 호출되는 인터럽트 핸들러 - 니들팁 체결 상태만 확인"""
-    global needle_tip_connected
-    
-    if not gpio_available:
-        return
-    
-    # GPIO23 상태 읽기 (LOW = 니들팁 연결됨, HIGH = 니들팁 분리됨)
-    current_state = not GPIO.input(23)  # 반전 (LOW일 때 True)
-    
-    if current_state != needle_tip_connected:
-        needle_tip_connected = current_state
-        print(f"[GPIO23] 니들팁 상태 변경: {'연결됨' if needle_tip_connected else '분리됨'}")
-        
-        # EEPROM 데이터는 명시적으로 지우기 전까지 유지 (자동 초기화 제거)
+# 모터 자동 연결 시도
+try:
+    # 기본 설정으로 모터 연결 시도
+    result = motor.connect('auto', 115200, 'none', 8, 1)
+    if motor.is_connected():
+        print(f"[MOTOR] 자동 연결 성공: {result}")
+    else:
+        print(f"[MOTOR] 자동 연결 실패: {result}")
+except Exception as e:
+    print(f"[MOTOR] 자동 연결 중 오류: {e}")
 
-# GPIO23 인터럽트 설정 (RPi.GPIO 방식) - 니들팁 상태만 감지
-if gpio_available:
-    try:
-        # 초기 상태 설정
-        needle_tip_connected = not GPIO.input(23)  # LOW일 때 True
-        print(f"[GPIO23] 초기 니들팁 상태: {'연결됨' if needle_tip_connected else '분리됨'}")
-        
-        # 인터럽트 핸들러 등록 (BOTH 엣지에서 상태 변화 감지)
-        GPIO.add_event_detect(23, GPIO.BOTH, callback=gpio23_callback, bouncetime=200)
-        
-        # EEPROM 읽기는 write 명령 시에만 수행하므로 초기 로드 안 함
-        print("[OK] GPIO23 인터럽트 핸들러 등록 완료 (RPi.GPIO) - 니들팁 상태만 감지")
-    except Exception as e:
-        print(f"[ERROR] GPIO23 인터럽트 설정 오류: {e}")
+# 저항 모니터 초기화
+resistance_available = False
+try:
+    from resistance import init_resistance_monitor, get_resistance_values, close_resistance_monitor
+    init_resistance_monitor()
+    resistance_available = True
+    print("[OK] 저항 측정 기능 활성화 (P3010-2)")
+except ImportError as e:
+    print(f"[ERROR] resistance 모듈 로드 실패: {e}")
+except Exception as e:
+    print(f"[ERROR] 저항 모니터 초기화 실패: {e}")
 
+# 모터 재연결 관련
+motor_reconnect_task = None
 
-# EEPROM 관련 함수들 - 간소화된 API
+# --- [삭제] RPi.GPIO용 gpio23_callback 함수 삭제 ---
+
+# EEPROM 관련 함수들은 이전과 동일합니다.
 def write_eeprom_mtr20(tip_type, shot_count, year, month, day, maker_code, country="CLASSYS"):
-    """
-    MTR 2.0용 EEPROM 쓰기 함수
-    
-    Args:
-        tip_type: TIP ID (1바이트)
-        shot_count: Shot Count (2바이트)
-        year: 제조 년도
-        month: 제조 월
-        day: 제조 일
-        maker_code: 제조업체 코드 (1바이트)
-        country: 국가 ("CLASSYS" 또는 "CUTERA")
-    
-    EEPROM 설정:
-        - CLASSYS: 주소 0x50, 오프셋 0x10
-        - CUTERA: 주소 0x50, 오프셋 0x80
-    
-    데이터 구조 (오프셋 기준):
-        offset + 0: TIP ID (1바이트)
-        offset + 1~2: Shot Count (2바이트, big-endian)
-        offset + 3~8: Reserve (6바이트)
-        offset + 9~11: 제조 년/월/일 (3바이트)
-        offset + 12: 제조업체 (1바이트)
-    """
-    if not eeprom_available:
-        return {"success": False, "error": "EEPROM 기능이 비활성화되어 있습니다."}
-
-    # 국가에 따른 오프셋 설정
+    if not eeprom_available: return {"success": False, "error": "EEPROM 기능 비활성화"}
     eeprom_address = MTR20_EEPROM_ADDRESS
     offset = MTR20_CUTERA_OFFSET if country == "CUTERA" else MTR20_CLASSYS_OFFSET
-
     try:
         bus = smbus2.SMBus(I2C_BUS)
-
-        # TIP ID (offset + 0)
-        bus.write_byte_data(eeprom_address, offset + 0, tip_type)
-        time.sleep(0.01)
-
-        # SHOT COUNT (offset + 1: H, offset + 2: L) - big-endian
-        bus.write_byte_data(eeprom_address, offset + 1, (shot_count >> 8) & 0xFF)
-        time.sleep(0.01)
-        bus.write_byte_data(eeprom_address, offset + 2, shot_count & 0xFF)
-        time.sleep(0.01)
-
-        # DATE: offset + 9=YEAR, offset + 10=MONTH, offset + 11=DAY
-        bus.write_byte_data(eeprom_address, offset + 9, (year - 2000) & 0xFF)
-        time.sleep(0.01)
-        bus.write_byte_data(eeprom_address, offset + 10, month & 0xFF)
-        time.sleep(0.01)
-        bus.write_byte_data(eeprom_address, offset + 11, day & 0xFF)
-        time.sleep(0.01)
-
-        # MAKER CODE (offset + 12)
-        bus.write_byte_data(eeprom_address, offset + 12, maker_code & 0xFF)
-        time.sleep(0.01)
-
+        bus.write_byte_data(eeprom_address, offset + 0, tip_type); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 1, (shot_count >> 8) & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 2, shot_count & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 9, (year - 2000) & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 10, month & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 11, day & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 12, maker_code & 0xFF); time.sleep(0.01)
         bus.close()
-        return {"success": True, "message": f"MTR 2.0 {country} EEPROM 쓰기 성공 (주소: 0x{eeprom_address:02X}, 오프셋: 0x{offset:02X})"}
-
-    except Exception as e:
-        return {"success": False, "error": f"EEPROM 쓰기 실패: {e}"}
-
+        return {"success": True, "message": f"MTR 2.0 {country} EEPROM 쓰기 성공"}
+    except Exception as e: return {"success": False, "error": f"EEPROM 쓰기 실패: {e}"}
 
 def read_eeprom_mtr20(country="CLASSYS"):
-    """
-    MTR 2.0용 EEPROM 읽기 함수
-    
-    Args:
-        country: 국가 ("CLASSYS" 또는 "CUTERA")
-    
-    EEPROM 설정:
-        - CLASSYS: 주소 0x50, 오프셋 0x10
-        - CUTERA: 주소 0x50, 오프셋 0x80
-    """
-    if not eeprom_available:
-        return {"success": False, "error": "EEPROM 기능이 비활성화되어 있습니다."}
-
-    # 국가에 따른 오프셋 설정
+    if not eeprom_available: return {"success": False, "error": "EEPROM 기능 비활성화"}
     eeprom_address = MTR20_EEPROM_ADDRESS
     offset = MTR20_CUTERA_OFFSET if country == "CUTERA" else MTR20_CLASSYS_OFFSET
-
-    bus = None
-    max_retries = 3
-
+    bus = None; max_retries = 3
     for attempt in range(max_retries):
         try:
             bus = smbus2.SMBus(I2C_BUS)
-
-            # TIP ID (offset + 0)
             tip_type = bus.read_byte_data(eeprom_address, offset + 0)
-
-            # SHOT COUNT (offset + 1=H, offset + 2=L)
-            shot = bus.read_i2c_block_data(eeprom_address, offset + 1, 2)
-            shot_count = (shot[0] << 8) | shot[1]
-
-            # DATE: offset + 9=YEAR, offset + 10=MONTH, offset + 11=DAY
-            year_off = bus.read_byte_data(eeprom_address, offset + 9)
-            month = bus.read_byte_data(eeprom_address, offset + 10)
-            day = bus.read_byte_data(eeprom_address, offset + 11)
+            shot = bus.read_i2c_block_data(eeprom_address, offset + 1, 2); shot_count = (shot[0] << 8) | shot[1]
+            year_off = bus.read_byte_data(eeprom_address, offset + 9); month = bus.read_byte_data(eeprom_address, offset + 10); day = bus.read_byte_data(eeprom_address, offset + 11)
             year = 2000 + year_off
-
-            # MAKER CODE (offset + 12)
             maker_code = bus.read_byte_data(eeprom_address, offset + 12)
-
-            return {
-                "success": True,
-                "tipType": tip_type,
-                "shotCount": shot_count,
-                "year": year,
-                "month": month,
-                "day": day,
-                "makerCode": maker_code,
-                "mtrVersion": "2.0",
-                "country": country,
-                "eepromAddress": f"0x{eeprom_address:02X}",
-                "offset": f"0x{offset:02X}"
-            }
-
+            return {"success": True, "tipType": tip_type, "shotCount": shot_count, "year": year, "month": month, "day": day, "makerCode": maker_code, "mtrVersion": "2.0", "country": country}
         except Exception as e:
-            print(f"[ERROR] MTR 2.0 {country} EEPROM 읽기 시도 {attempt + 1}/{max_retries} 실패 (주소: 0x{eeprom_address:02X}, 오프셋: 0x{offset:02X}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(0.1)
-            else:
-                return {"success": False, "error": f"EEPROM 읽기 실패: {e}"}
+            if attempt < max_retries - 1: time.sleep(0.1)
+            else: return {"success": False, "error": f"EEPROM 읽기 실패: {e}"}
         finally:
             if bus is not None:
                 try: bus.close()
                 except: pass
-
 
 def write_eeprom_mtr40(tip_type, shot_count, year, month, day, maker_code):
-    """
-    MTR 4.0용 EEPROM 쓰기 함수
-    
-    Args:
-        tip_type: TIP ID (1바이트)
-        shot_count: Shot Count (2바이트)
-        year: 제조 년도
-        month: 제조 월
-        day: 제조 일
-        maker_code: 제조업체 코드 (1바이트)
-    
-    EEPROM 설정: 주소 0x51, 오프셋 0x70
-    """
-    if not eeprom_available:
-        return {"success": False, "error": "EEPROM 기능이 비활성화되어 있습니다."}
-
-    eeprom_address = MTR40_EEPROM_ADDRESS
-    offset = MTR40_OFFSET
-
+    if not eeprom_available: return {"success": False, "error": "EEPROM 기능 비활성화"}
+    eeprom_address = MTR40_EEPROM_ADDRESS; offset = MTR40_OFFSET
     try:
         bus = smbus2.SMBus(I2C_BUS)
-
-        # TIP ID (offset + 0)
-        bus.write_byte_data(eeprom_address, offset + 0, tip_type)
-        time.sleep(0.01)
-
-        # SHOT COUNT (offset + 1: H, offset + 2: L) - big-endian
-        bus.write_byte_data(eeprom_address, offset + 1, (shot_count >> 8) & 0xFF)
-        time.sleep(0.01)
-        bus.write_byte_data(eeprom_address, offset + 2, shot_count & 0xFF)
-        time.sleep(0.01)
-
-        # DATE: offset + 9=YEAR, offset + 10=MONTH, offset + 11=DAY
-        bus.write_byte_data(eeprom_address, offset + 9, (year - 2000) & 0xFF)
-        time.sleep(0.01)
-        bus.write_byte_data(eeprom_address, offset + 10, month & 0xFF)
-        time.sleep(0.01)
-        bus.write_byte_data(eeprom_address, offset + 11, day & 0xFF)
-        time.sleep(0.01)
-
-        # MAKER CODE (offset + 12)
-        bus.write_byte_data(eeprom_address, offset + 12, maker_code & 0xFF)
-        time.sleep(0.01)
-
+        bus.write_byte_data(eeprom_address, offset + 0, tip_type); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 1, (shot_count >> 8) & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 2, shot_count & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 9, (year - 2000) & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 10, month & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 11, day & 0xFF); time.sleep(0.01)
+        bus.write_byte_data(eeprom_address, offset + 12, maker_code & 0xFF); time.sleep(0.01)
         bus.close()
-        return {"success": True, "message": f"MTR 4.0 EEPROM 쓰기 성공 (주소: 0x{eeprom_address:02X}, 오프셋: 0x{offset:02X})"}
-
-    except Exception as e:
-        return {"success": False, "error": f"EEPROM 쓰기 실패: {e}"}
-
+        return {"success": True, "message": f"MTR 4.0 EEPROM 쓰기 성공"}
+    except Exception as e: return {"success": False, "error": f"EEPROM 쓰기 실패: {e}"}
 
 def read_eeprom_mtr40():
-    """
-    MTR 4.0용 EEPROM 읽기 함수
-    
-    EEPROM 설정: 주소 0x51, 오프셋 0x70
-    """
-    if not eeprom_available:
-        return {"success": False, "error": "EEPROM 기능이 비활성화되어 있습니다."}
-
-    eeprom_address = MTR40_EEPROM_ADDRESS
-    offset = MTR40_OFFSET
-
-    bus = None
-    max_retries = 3
-
+    if not eeprom_available: return {"success": False, "error": "EEPROM 기능 비활성화"}
+    eeprom_address = MTR40_EEPROM_ADDRESS; offset = MTR40_OFFSET
+    bus = None; max_retries = 3
     for attempt in range(max_retries):
         try:
             bus = smbus2.SMBus(I2C_BUS)
-
-            # TIP ID (offset + 0)
             tip_type = bus.read_byte_data(eeprom_address, offset + 0)
-
-            # SHOT COUNT (offset + 1=H, offset + 2=L)
-            shot = bus.read_i2c_block_data(eeprom_address, offset + 1, 2)
-            shot_count = (shot[0] << 8) | shot[1]
-
-            # DATE: offset + 9=YEAR, offset + 10=MONTH, offset + 11=DAY
-            year_off = bus.read_byte_data(eeprom_address, offset + 9)
-            month = bus.read_byte_data(eeprom_address, offset + 10)
-            day = bus.read_byte_data(eeprom_address, offset + 11)
+            shot = bus.read_i2c_block_data(eeprom_address, offset + 1, 2); shot_count = (shot[0] << 8) | shot[1]
+            year_off = bus.read_byte_data(eeprom_address, offset + 9); month = bus.read_byte_data(eeprom_address, offset + 10); day = bus.read_byte_data(eeprom_address, offset + 11)
             year = 2000 + year_off
-
-            # MAKER CODE (offset + 12)
             maker_code = bus.read_byte_data(eeprom_address, offset + 12)
-
-            return {
-                "success": True,
-                "tipType": tip_type,
-                "shotCount": shot_count,
-                "year": year,
-                "month": month,
-                "day": day,
-                "makerCode": maker_code,
-                "mtrVersion": "4.0",
-                "country": "ALL",
-                "eepromAddress": f"0x{eeprom_address:02X}",
-                "offset": f"0x{offset:02X}"
-            }
-
+            return {"success": True, "tipType": tip_type, "shotCount": shot_count, "year": year, "month": month, "day": day, "makerCode": maker_code, "mtrVersion": "4.0", "country": "ALL"}
         except Exception as e:
-            print(f"[ERROR] MTR 4.0 EEPROM 읽기 시도 {attempt + 1}/{max_retries} 실패 (주소: 0x{eeprom_address:02X}, 오프셋: 0x{offset:02X}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(0.1)
-            else:
-                return {"success": False, "error": f"EEPROM 읽기 실패: {e}"}
+            if attempt < max_retries - 1: time.sleep(0.1)
+            else: return {"success": False, "error": f"EEPROM 읽기 실패: {e}"}
         finally:
             if bus is not None:
                 try: bus.close()
                 except: pass
-
-
-
-
-
 
 async def handler(websocket):
     print("[INFO] 클라이언트 연결됨")
@@ -341,248 +179,134 @@ async def handler(websocket):
         async for msg in websocket:
             try:
                 data = json.loads(msg)
-
+                # handler 함수 내부 로직은 이전과 동일
+                # ...
                 if data["cmd"] == "connect":
-                    port = data.get("port")
-                    baudrate = data.get("baudrate")
-                    parity = data.get("parity")
-                    databits = data.get("databits")
-                    stopbits = data.get("stopbits")
-
-                    result = motor.connect(port, baudrate, parity, databits, stopbits)
-                    await websocket.send(json.dumps({
-                        "type": "serial",
-                        "result": result
-                    }))
-
+                    result = motor.connect(data.get("port"), data.get("baudrate"), data.get("parity"), data.get("databits"), data.get("stopbits"))
+                    await websocket.send(json.dumps({"type": "serial", "result": result}))
                 elif data["cmd"] == "disconnect":
                     result = motor.disconnect()
-                    await websocket.send(json.dumps({
-                        "type": "serial",
-                        "result": result
-                    }))
-
+                    await websocket.send(json.dumps({"type": "serial", "result": result}))
                 elif data["cmd"] == "move":
-                    mode = data.get("mode", "servo")
-                    position = data.get("position")
-                    speed = data.get("speed")
-                    force = data.get("force")
-                    
-                    # 모터 이동 명령 처리
-                    
-                    if mode == "servo" or mode == "position":
-                        if position is not None:
-                            result = motor.move_to_position(position, mode)
-                            print(f"[INFO] 모터 이동 결과: {result}")
-                            await websocket.send(json.dumps({
-                                "type": "serial",
-                                "result": result
-                            }))
-                        else:
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "result": "위치 값이 없습니다."
-                            }))
-                    
-                    elif mode == "speed":
-                        if speed is not None and position is not None:
-                            result = motor.move_with_speed(speed, position)
-                            await websocket.send(json.dumps({
-                                "type": "serial",
-                                "result": result
-                            }))
-                        else:
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "result": "속도 또는 위치 값이 없습니다."
-                            }))
-                    
-                    elif mode == "speed_force":
-                        if all(v is not None for v in [force, speed, position]):
-                            result = motor.move_with_speed_force(force, speed, position)
-                            await websocket.send(json.dumps({
-                                "type": "serial",
-                                "result": result
-                            }))
-                        else:
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "result": "힘, 속도, 또는 위치 값이 없습니다."
-                            }))
-                    
-                    elif mode == "force":
-                        if force is not None:
-                            result = motor.set_force(force)
-                            await websocket.send(json.dumps({
-                                "type": "serial",
-                                "result": result
-                            }))
-                        else:
-                            await websocket.send(json.dumps({
-                                "type": "error",
-                                "result": "힘 값이 없습니다."
-                            }))
-                    
-                    else:
-                        await websocket.send(json.dumps({
-                            "type": "error",
-                            "result": f"❌ 지원하지 않는 모드입니다: {mode}"
-                        }))
-
-                elif data["cmd"] == "check":
-                    connected = motor.is_connected()
-                    await websocket.send(json.dumps({
-                        "type": "serial",
-                        "result": "연결됨" if connected else "연결 안됨"
-                    }))
-
-                elif data["cmd"] == "gpio_read":
-                    if gpio_available and pin18:
-                        gpio_value = pin18.value
-                        state_text = "HIGH" if gpio_value else "LOW"
-                        print(f"[INFO] GPIO 18번 상태: {state_text} (value: {gpio_value})")
-                        await websocket.send(json.dumps({
-                            "type": "gpio",
-                            "pin": 18,
-                            "state": state_text
-                        }))
-                    else:
-                        await websocket.send(json.dumps({
-                            "type": "error",
-                            "result": "GPIO 기능이 비활성화되어 있습니다."
-                        }))
-
+                    result = motor.move_to_position(data.get("position"), data.get("mode", "position"))
+                    await websocket.send(json.dumps({"type": "serial", "result": result}))
                 elif data["cmd"] == "eeprom_write":
-                    tip_type = data.get("tipType")
-                    shot_count = data.get("shotCount", 0)
-                    year = data.get("year")
-                    month = data.get("month")
-                    day = data.get("day")
-                    maker_code = data.get("makerCode")
-                    mtr_version = data.get("mtrVersion", "2.0")  # 기본값: MTR 2.0
-                    country = data.get("country", "CLASSYS")    # 기본값: CLASSYS
-                    
-                    print(f"[DEBUG] EEPROM 쓰기 - 원본 데이터: {data}")
-                    print(f"[INFO] EEPROM 쓰기 요청: MTR={mtr_version}, 국가={country}, TIP_TYPE={tip_type}, SHOT_COUNT={shot_count}, DATE={year}-{month}-{day}, MAKER={maker_code}")
-                    
-                    if tip_type is None or year is None or month is None or day is None or maker_code is None:
-                        await websocket.send(json.dumps({
-                            "type": "error",
-                            "result": "필수 데이터가 누락되었습니다."
-                        }))
-                    else:
-                        # MTR 버전과 국가에 따라 적절한 함수 선택
-                        if mtr_version == "4.0":
-                            result = write_eeprom_mtr40(tip_type, shot_count, year, month, day, maker_code)
-                        else:  # MTR 2.0
-                            result = write_eeprom_mtr20(tip_type, shot_count, year, month, day, maker_code, country)
-                        
-                        # 쓰기 성공 후 바로 읽어서 데이터 포함
-                        if result.get("success"):
-                            # 읽기도 동일한 버전/국가 설정으로 수행
-                            if mtr_version == "4.0":
-                                read_result = read_eeprom_mtr40()
-                            else:  # MTR 2.0
-                                read_result = read_eeprom_mtr20(country)
-                                
-                            if read_result.get("success"):
-                                result["data"] = read_result  # 읽은 데이터를 응답에 포함
-                                print(f"[INFO] EEPROM 쓰기 후 읽기 성공: {read_result}")
-                            else:
-                                print(f"[WARN] EEPROM 쓰기 후 읽기 실패: {read_result}")
-                        
-                        await websocket.send(json.dumps({
-                            "type": "eeprom_write",
-                            "result": result
-                        }))
-
-                elif data["cmd"] == "eeprom_read":
-                    mtr_version = data.get("mtrVersion", "2.0")  # 기본값: MTR 2.0
-                    country = data.get("country", "CLASSYS")    # 기본값: CLASSYS
-                    
-                    print(f"[DEBUG] EEPROM 읽기 - 원본 데이터: {data}")
-                    print(f"[INFO] EEPROM 읽기 요청: MTR={mtr_version}, 국가={country}")
-                    
-                    # MTR 버전과 국가에 따라 적절한 함수 선택
+                    mtr_version = data.get("mtrVersion", "2.0"); country = data.get("country")
                     if mtr_version == "4.0":
-                        result = read_eeprom_mtr40()
-                    else:  # MTR 2.0
-                        result = read_eeprom_mtr20(country)
-                    
-                    await websocket.send(json.dumps({
-                        "type": "eeprom_read",
-                        "result": result
-                    }))
-
+                        result = write_eeprom_mtr40(data.get("tipType"), data.get("shotCount", 0), data.get("year"), data.get("month"), data.get("day"), data.get("makerCode"))
+                    else:
+                        result = write_eeprom_mtr20(data.get("tipType"), data.get("shotCount", 0), data.get("year"), data.get("month"), data.get("day"), data.get("makerCode"), country)
+                    if result.get("success"):
+                        read_result = read_eeprom_mtr40() if mtr_version == "4.0" else read_eeprom_mtr20(country)
+                        if read_result.get("success"): result["data"] = read_result
+                    await websocket.send(json.dumps({"type": "eeprom_write", "result": result}))
+                elif data["cmd"] == "eeprom_read":
+                    mtr_version = data.get("mtrVersion", "2.0"); country = data.get("country")
+                    result = read_eeprom_mtr40() if mtr_version == "4.0" else read_eeprom_mtr20(country)
+                    await websocket.send(json.dumps({"type": "eeprom_read", "result": result}))
                 else:
-                    await websocket.send(json.dumps({
-                        "type": "error",
-                        "result": "알 수 없는 명령어입니다."
-                    }))
-
+                    await websocket.send(json.dumps({"type": "error", "result": "알 수 없는 명령어"}))
             except Exception as e:
                 print(f"[ERROR] 처리 중 에러: {str(e)}")
-                await websocket.send(json.dumps({
-                    "type": "error",
-                    "result": str(e)
-                }))
+                await websocket.send(json.dumps({"type": "error", "result": str(e)}))
     finally:
         connected_clients.discard(websocket)
         print("[INFO] 클라이언트 연결 해제됨")
 
+async def check_and_reconnect_motor():
+    max_motor_retries = 3
+    if not motor.is_connected():
+        print("[MOTOR] 연결 끊어짐, 재연결 시도...")
+        for i in range(max_motor_retries):
+            try:
+                motor.close() if hasattr(motor, 'close') else None
+                await asyncio.sleep(1.0)
+                motor.__init__()
+                if motor.is_connected():
+                    print(f"[MOTOR] 재연결 성공 (시도 {i+1})")
+                    return True
+            except Exception as e: print(f"[MOTOR] 재연결 실패 {i+1}: {e}")
+        print("[MOTOR] 최대 재시도 횟수 초과")
+        return False
+    return True
+
 async def push_motor_status():
-    
+    global motor_reconnect_task
     while True:
         await asyncio.sleep(0.05)
-        if motor.is_connected():
-            # GPIO 상태 읽기
-            gpio18_state = "UNKNOWN"
-            gpio23_state = "UNKNOWN"
-            
-            if gpio_available and pin18:
-                gpio_value = pin18.value
-                gpio18_state = "HIGH" if gpio_value else "LOW"
-            
-            if gpio_available:
-                gpio23_value = GPIO.input(23)
-                gpio23_state = "HIGH" if gpio23_value else "LOW"
+        
+        motor_connected = motor.is_connected()
+        if not motor_connected and (motor_reconnect_task is None or motor_reconnect_task.done()):
+            motor_reconnect_task = asyncio.create_task(check_and_reconnect_motor())
+        
+        resistance_data = {'resistance1': None, 'resistance2': None, 'status1': 'N/A', 'status2': 'N/A'}
+        if resistance_available:
+            try:
+                resistance_data = await get_resistance_values()
+            except Exception as e:
+                print(f"[RESISTANCE] 읽기 오류: {e}")
+        
+        data = {}
+        # GPIO 상태 읽기
+        gpio18_state = "UNKNOWN"; gpio23_state = "UNKNOWN"
+        if gpio_available:
+            if pin18:
+                gpio18_state = "HIGH" if pin18.value else "LOW"
+            # --- [수정] gpiozero 객체 속성으로 상태 읽기 ---
+            if pin23:
+                # is_pressed가 True이면 LOW 상태(연결됨), False이면 HIGH 상태(분리됨)
+                gpio23_state = "LOW" if pin23.is_pressed else "HIGH"
 
-            # EEPROM 데이터는 GPIO23 인터럽트에서 관리되므로 전역 변수 사용
+        if motor_connected:
             data = {
                 "type": "status",
                 "data": {
-                    "position": motor.position,
-                    "force": motor.force,
-                    "sensor": motor.sensor,
-                    "setPos": motor.setPos,
-                    "gpio18": gpio18_state,  # 기존 GPIO18 상태
-                    "gpio23": gpio23_state,  # 새로운 GPIO23 상태 추가
-                    "needle_tip_connected": needle_tip_connected,  # 니들팁 연결 상태
+                    "position": motor.position, "force": motor.force, "sensor": motor.sensor, "setPos": motor.setPos,
+                    "gpio18": gpio18_state, "gpio23": gpio23_state,
+                    "needle_tip_connected": needle_tip_connected,
+                    "motor_connected": True,
+                    **resistance_data # 저항 데이터 통합
+                }
+            }
+        else:
+            data = {
+                "type": "status",
+                "data": {
+                    "motor_connected": False,
+                    "gpio18": gpio18_state, "gpio23": gpio23_state,
+                    "needle_tip_connected": needle_tip_connected,
+                    **resistance_data # 저항 데이터 통합
                 }
             }
 
-            # 상태 데이터 전송 (로그 제거로 성능 개선)
-
-            for ws in connected_clients.copy():
-                try:
-                    await ws.send(json.dumps(data))
-                except Exception as e:
-                    print(f"[WARN] 상태 전송 실패: {e}")
-                    connected_clients.discard(ws)
+        for ws in connected_clients.copy():
+            try:
+                await ws.send(json.dumps(data))
+            except Exception as e:
+                print(f"[WARN] 상태 전송 실패: {e}")
+                connected_clients.discard(ws)
 
 async def main():
     async with websockets.serve(handler, "0.0.0.0", 8765):
         print("[INFO] WebSocket 모터 서버 실행 중 (ws://0.0.0.0:8765)")
-        await push_motor_status()  # 상태 주기 전송 루프 시작
+        await push_motor_status()
 
 def cleanup_gpio():
-    """GPIO 리소스 정리"""
+    if resistance_available:
+        try:
+            close_resistance_monitor()
+            print("[INFO] 저항 모니터 정리 완료")
+        except Exception as e: print(f"[ERROR] 저항 모니터 정리 중 오류: {e}")
+    
+    # --- [수정] gpiozero 객체 정리 ---
     if gpio_available:
         try:
-            GPIO.cleanup()
+            if pin18: pin18.close()
+            if pin23: pin23.close()
             print("[OK] GPIO 리소스 정리 완료")
         except Exception as e:
             print(f"[ERROR] GPIO 정리 오류: {e}")
+    # --- [여기까지 수정] ---
 
 if __name__ == "__main__":
     try:

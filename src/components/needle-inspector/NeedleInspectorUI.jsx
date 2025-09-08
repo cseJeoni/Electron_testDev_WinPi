@@ -50,6 +50,12 @@ export default function NeedleInspectorUI() {
   const [readEepromData, setReadEepromData] = useState(null) // EEPROM 읽기 데이터
   const [needleTipConnected, setNeedleTipConnected] = useState(false) // GPIO23 기반 니들팁 연결 상태
   const [isWaitingEepromRead, setIsWaitingEepromRead] = useState(false) // EEPROM 읽기 응답 대기 상태
+  
+  // 저항 측정 상태 관리
+  const [resistance1, setResistance1] = useState(null)
+  const [resistance2, setResistance2] = useState(null)
+  const [resistance1Status, setResistance1Status] = useState('N/A')
+  const [resistance2Status, setResistance2Status] = useState('N/A')
 
   // 니들팁 연결 상태에 따른 작업 상태 업데이트
   useEffect(() => {
@@ -616,7 +622,7 @@ export default function NeedleInspectorUI() {
   // 모터 WebSocket 연결 및 자동 연결
   useEffect(() => {
     console.log('🔧 모터 WebSocket 연결 시도...')
-    const socket = new WebSocket("ws://192.168.0.122:8765")
+    const socket = new WebSocket("ws://192.168.0.114:8765")
 
     socket.onopen = () => {
       console.log("✅ 모터 WebSocket 연결 성공")
@@ -663,9 +669,22 @@ export default function NeedleInspectorUI() {
             }
           }
         } else if (res.type === "status") {
-          // 상태 업데이트 (모터 + GPIO + EEPROM)
-          const { position, gpio18, gpio23, needle_tip_connected, eeprom } = res.data
+          // 상태 업데이트 (모터 + GPIO + EEPROM + 저항)
+          const { position, gpio18, gpio23, needle_tip_connected, eeprom, 
+                  resistance1, resistance2, resistance1_status, resistance2_status,
+                  motor_connected } = res.data
           setCurrentPosition(position)
+          
+          // 저항값 상태 업데이트
+          if (resistance1 !== undefined) setResistance1(resistance1)
+          if (resistance2 !== undefined) setResistance2(resistance2)
+          if (resistance1_status) setResistance1Status(resistance1_status)
+          if (resistance2_status) setResistance2Status(resistance2_status)
+          
+          // 모터 연결 상태 업데이트
+          if (typeof motor_connected === 'boolean') {
+            setIsMotorConnected(motor_connected)
+          }
           
           // 니들 위치를 기본 'UP'으로 설정 (하드코딩 제거)
           // 실제 위치와 관계없이 항상 UP 상태로 처리
@@ -847,7 +866,7 @@ export default function NeedleInspectorUI() {
 
     // 직접 모터 명령 WebSocket 생성
     console.log("🔗 모터 명령용 WebSocket 연결 생성...")
-    const autoSocket = new WebSocket('ws://192.168.0.122:8765')
+    const autoSocket = new WebSocket('ws://192.168.0.114:8765')
     
     autoSocket.onopen = () => {
       console.log("✅ 모터 명령용 WebSocket 연결 성공")
@@ -1023,6 +1042,10 @@ export default function NeedleInspectorUI() {
             websocket={ws}
             isWsConnected={isWsConnected}
             onMotorPositionChange={setCalculatedMotorPosition}
+            resistance1={resistance1}
+            resistance2={resistance2}
+            resistance1Status={resistance1Status}
+            resistance2Status={resistance2Status}
           />
           <JudgePanel 
             onJudge={(result) => console.log(`판정 결과: ${result}`)}
